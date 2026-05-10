@@ -1,3 +1,5 @@
 pyTelegramBotAPI
 requests
 user-agent
+telebot
+requests
