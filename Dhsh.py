@@ -1,13 +1,18 @@
 import telebot
 import time
 import threading
-from telebot import types
-import requests
 import random
 import os
 import re
 import string
+import requests
+import json
 from datetime import datetime
+from telebot import types
+
+# ===================================================================
+# ========================== ملفات البوابات ==========================
+# ===================================================================
 from reg import reg
 from Strip import Stripe1
 from strip_Auth2 import Stripe2
@@ -20,21 +25,394 @@ from braintree2 import bra2
 from braintree_charge import BraC
 from freedom_donate import Donate
 
-# ==================== توكن البوت ====================
-token = '8490768092:AAF_GAGrBWUmY4u3NAFATaYwNJDKLjEViLQ'
-bot = telebot.TeleBot(token, parse_mode="HTML")
+# ===================================================================
+# ========================== إعدادات البوت ==========================
+# ===================================================================
+TOKEN = '8490768092:AAF_GAGrBWUmY4u3NAFATaYwNJDKLjEViLQ'
+ADMIN_ID = 1489001988
+bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
-# ==================== بيانات ====================
-admin = 1489001988
-stopuser = {}
-command_usage = {}
-user_file = {}
-pending_gateway = {}
+# ===================================================================
+# ========================== قاعدة البيانات ==========================
+# ===================================================================
+USERS_FILE = "users_data.json"  # ملف لحفظ بيانات المستخدمين
+REFERRAL_FILE = "referrals.json"  # ملف للإحالات
+INCIDENTS_FILE = "incidents.json"  # ملف للمشاكل
+
+def load_users():
+    """تحميل بيانات المستخدمين من الملف"""
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_users(users):
+    """حفظ بيانات المستخدمين في الملف"""
+    with open(USERS_FILE, 'w') as f:
+        json.dump(users, f, indent=4)
+
+def load_referrals():
+    if os.path.exists(REFERRAL_FILE):
+        with open(REFERRAL_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_referrals(refs):
+    with open(REFERRAL_FILE, 'w') as f:
+        json.dump(refs, f, indent=4)
+
+def load_incidents():
+    if os.path.exists(INCIDENTS_FILE):
+        with open(INCIDENTS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_incidents(incs):
+    with open(INCIDENTS_FILE, 'w') as f:
+        json.dump(incs, f, indent=4)
+
+# تحميل البيانات
+users_data = load_users()
+referrals_data = load_referrals()
+incidents_data = load_incidents()
+
+# متغيرات مؤقتة
 pending_cards = {}
 pending_mass_cards = {}
-pending_bin_count = {}
+pending_user_files = {}
+pending_gen_count = {}
+pending_gateway = {}
+stop_check = {}
+command_usage = {}
 
-# ==================== دوال مساعدة ====================
+# ===================================================================
+# ========================== إدارة المستخدمين ==========================
+# ===================================================================
+
+def create_user(user_id, username, first_name, referrer_id=None):
+    """إنشاء مستخدم جديد"""
+    if str(user_id) not in users_data:
+        users_data[str(user_id)] = {
+            "name": first_name,
+            "username": username,
+            "points": 10,  # 10 نقاط مجانية للبداية
+            "total_checks": 0,
+            "approved_checks": 0,
+            "banned": False,
+            "vip": False,
+            "vip_until": None,
+            "referral_code": f"REF{user_id}{random.randint(1000,9999)}",
+            "referred_by": referrer_id,
+            "join_date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        }
+        save_users(users_data)
+        
+        # معالجة الإحالة
+        if referrer_id and str(referrer_id) in users_data:
+            # إضافة نقاط للمستخدم القديم
+            users_data[str(referrer_id)]["points"] += 5
+            save_users(users_data)
+            
+            # تسجيل الإحالة
+            if str(referrer_id) not in referrals_data:
+                referrals_data[str(referrer_id)] = []
+            referrals_data[str(referrer_id)].append({
+                "user_id": user_id,
+                "username": username,
+                "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+            save_referrals(referrals_data)
+            
+            # إشعار للمستخدم القديم
+            bot.send_message(referrer_id, f"🎉 مبروك! {first_name} سجل باستخدام كودك\n✨ تم إضافة 5 نقاط إلى رصيدك")
+        
+        # إشعار للأدمن بمستخدم جديد
+        bot.send_message(
+            ADMIN_ID,
+            f"🆕 **مستخدم جديد**\n━━━━━━━━━━━━━━━━\n"
+            f"📛 **الاسم:** {first_name}\n"
+            f"🆔 **اليوزر:** @{username or 'لا يوجد'}\n"
+            f"🆔 **الايدي:** `{user_id}`\n"
+            f"🎫 **كود الإحالة:** `{users_data[str(user_id)]['referral_code']}`\n"
+            f"📅 **التاريخ:** {users_data[str(user_id)]['join_date']}"
+        )
+        return True
+    return False
+
+def check_points(user_id, required_points=1):
+    """التحقق من النقاط وخصمها"""
+    user_id = str(user_id)
+    
+    if user_id == str(ADMIN_ID):
+        return True
+    
+    if user_id not in users_data:
+        create_user(user_id, None, "مستخدم", None)
+    
+    user = users_data[user_id]
+    
+    if user.get("banned", False):
+        bot.send_message(int(user_id), "🚫 **أنت محظور من استخدام البوت**\nللتواصل مع الدعم: @s3s_a")
+        return False
+    
+    if user.get("points", 0) >= required_points:
+        users_data[user_id]["points"] -= required_points
+        save_users(users_data)
+        return True
+    else:
+        bot.send_message(
+            int(user_id), 
+            f"❌ **رصيدك غير كافي!**\n━━━━━━━━━━━━━━━━\n"
+            f"⭐ رصيدك الحالي: {user.get('points', 0)} نقطة\n"
+            f"🎫 المطلوب: {required_points} نقطة\n\n"
+            f"💎 **طرق الشحن:**\n"
+            f"• استخدام كود إحالة صديق\n"
+            f"• شراء نقاط: تواصل @s3s_a\n"
+            f"• انتظار عروض VIP"
+        )
+        return False
+
+def add_points(user_id, points, reason=""):
+    """إضافة نقاط للمستخدم"""
+    user_id = str(user_id)
+    if user_id in users_data:
+        users_data[user_id]["points"] += points
+        save_users(users_data)
+        bot.send_message(int(user_id), f"✅ تم إضافة {points} نقطة إلى رصيدك\n📝 السبب: {reason}\n⭐ رصيدك الحالي: {users_data[user_id]['points']}")
+    return False
+
+def record_check_result(user_id, approved):
+    """تسجيل نتيجة الفحص"""
+    user_id = str(user_id)
+    if user_id in users_data:
+        users_data[user_id]["total_checks"] += 1
+        if approved:
+            users_data[user_id]["approved_checks"] += 1
+        save_users(users_data)
+
+def report_gateway_issue(gateway_name, error_msg):
+    """الإبلاغ عن مشكلة في بوابة"""
+    issue_id = f"{gateway_name}_{int(time.time())}"
+    incidents_data[issue_id] = {
+        "gateway": gateway_name,
+        "error": error_msg,
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "resolved": False
+    }
+    save_incidents(incidents_data)
+    
+    # إشعار فوري للأدمن
+    bot.send_message(
+        ADMIN_ID,
+        f"⚠️ **مشكلة في بوابة**\n━━━━━━━━━━━━━━━━\n"
+        f"🔌 **البوابة:** {gateway_name}\n"
+        f"❌ **الخطأ:** {error_msg[:200]}\n"
+        f"🆔 **المعرف:** `{issue_id}`\n"
+        f"📅 **الوقت:** {incidents_data[issue_id]['time']}"
+    )
+
+# ===================================================================
+# ========================== القوائم الرئيسية ==========================
+# ===================================================================
+
+def main_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💳 فحص فيزا", callback_data="check_menu"),
+        types.InlineKeyboardButton("🃏 توليد فيزات", callback_data="gen_menu"),
+        types.InlineKeyboardButton("🔍 فحص بين", callback_data="bin_menu"),
+        types.InlineKeyboardButton("📄 بيانات شحن", callback_data="fake_menu"),
+        types.InlineKeyboardButton("📁 رفع ملف", callback_data="file_menu"),
+        types.InlineKeyboardButton("📊 فحص جماعي", callback_data="mass_check_menu"),
+        types.InlineKeyboardButton("🎁 إحالة", callback_data="referral_menu"),
+        types.InlineKeyboardButton("📈 إحصائياتي", callback_data="stats_menu"),
+        types.InlineKeyboardButton("ℹ️ المساعدة", callback_data="help_menu"),
+        types.InlineKeyboardButton("👤 حسابي", callback_data="profile_menu")
+    )
+    return markup
+
+def check_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🔐 Auth (تحقق)", callback_data="auth_menu"),
+        types.InlineKeyboardButton("💳 Charge (دفع)", callback_data="charge_menu"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main")
+    )
+    return markup
+
+def auth_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💳 Braintree", callback_data="braintree_auth_menu"),
+        types.InlineKeyboardButton("💰 Stripe", callback_data="stripe_auth_menu"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="check_menu")
+    )
+    return markup
+
+def stripe_auth_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    gateways = [
+        ("Stripe1", "st1"), ("Stripe2", "st2"), ("Stripe3", "st3"),
+        ("Stripe4", "st4"), ("Stripe5", "st5"), ("Stripe6", "st6")
+    ]
+    for name, code in gateways:
+        markup.add(types.InlineKeyboardButton(f"🔹 {name}", callback_data=f"gateway_st_{code}"))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="auth_menu"))
+    return markup
+
+def braintree_auth_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🔹 Braintree 1", callback_data="gateway_br_br1"),
+        types.InlineKeyboardButton("🔹 Braintree 2", callback_data="gateway_br_br2"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="auth_menu")
+    )
+    return markup
+
+def charge_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💝 Donate (تبرع)", callback_data="gateway_ch_donate"),
+        types.InlineKeyboardButton("🔹 Braintree Charge", callback_data="gateway_ch_braintree"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="check_menu")
+    )
+    return markup
+
+def gen_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🎲 بين واحد", callback_data="gen_single"),
+        types.InlineKeyboardButton("📚 بينات متعددة", callback_data="gen_multi"),
+        types.InlineKeyboardButton("🎭 نمط x", callback_data="gen_pattern"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main")
+    )
+    return markup
+
+def file_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("🔐 Auth", callback_data="file_auth_menu"),
+        types.InlineKeyboardButton("💳 Charge", callback_data="file_charge_menu"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main")
+    )
+    return markup
+
+def file_auth_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💰 Stripe", callback_data="file_stripe_list"),
+        types.InlineKeyboardButton("💳 Braintree", callback_data="file_braintree_list"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="file_menu")
+    )
+    return markup
+
+def file_stripe_list():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for name, code in [("Stripe1","st1"),("Stripe2","st2"),("Stripe3","st3"),("Stripe4","st4"),("Stripe5","st5"),("Stripe6","st6")]:
+        markup.add(types.InlineKeyboardButton(name, callback_data=f"file_start_st_{code}"))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="file_auth_menu"))
+    return markup
+
+def file_braintree_list():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("Braintree 1", callback_data="file_start_br_br1"),
+        types.InlineKeyboardButton("Braintree 2", callback_data="file_start_br_br2"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="file_auth_menu")
+    )
+    return markup
+
+def file_charge_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("Donate", callback_data="file_start_ch_donate"),
+        types.InlineKeyboardButton("Braintree Charge", callback_data="file_start_ch_braintree"),
+        types.InlineKeyboardButton("🔙 رجوع", callback_data="file_menu")
+    )
+    return markup
+
+def mass_gateway_menu():
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    gateways = [
+        ("Stripe1", "mass_st1"), ("Stripe2", "mass_st2"), ("Stripe3", "mass_st3"),
+        ("Stripe4", "mass_st4"), ("Stripe5", "mass_st5"), ("Stripe6", "mass_st6"),
+        ("Donate", "mass_donate"), ("Braintree1", "mass_br1"),
+        ("Braintree2", "mass_br2"), ("BraintreeCharge", "mass_chk1")
+    ]
+    for name, code in gateways:
+        markup.add(types.InlineKeyboardButton(name, callback_data=code))
+    markup.add(types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main"))
+    return markup
+
+def help_menu_content():
+    return """
+📖 **دليل استخدام البوت**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔰 **الأوامر السريعة:**
+┌ `/start` - القائمة الرئيسية
+├ `/str1` → `/str6` - فحص Stripe
+├ `/br1` - فحص Braintree 1  
+├ `/br2` - فحص Braintree 2
+├ `/donate` - فحص Donate
+├ `/chb` - فحص Braintree Charge
+├ `/gen` - توليد بطاقات
+└ `/mass` - فحص جماعي
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎴 **طريقة التوليد:**
+
+
+
+📇 **صيغة البطاقة:**
+`4168321234567890|12|2029|123`
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⭐ **نظام النقاط:**
+• نقطة مجانية لكل مستخدم جديد
+• كل فحص = 1 نقطة
+• كود الإحالة = 5 نقاط إضافية
+• VIP باشتراك شهري = فحص غير محدود
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👨‍💻 **المطور:** @s3s_a
+"""
+
+def profile_menu(user_id):
+    user_id = str(user_id)
+    if user_id not in users_data:
+        create_user(int(user_id), None, "مستخدم", None)
+    
+    user = users_data[user_id]
+    success_rate = 0
+    if user.get("total_checks", 0) > 0:
+        success_rate = (user.get("approved_checks", 0) / user.get("total_checks", 1)) * 100
+    
+    return f"""
+👤 **ملفي الشخصي**
+━━━━━━━━━━━━━━━━
+📛 **الاسم:** {user.get('name', 'غير معروف')}
+🆔 **اليوزر:** @{user.get('username', 'لا يوجد')}
+⭐ **النقاط:** {user.get('points', 0)}
+📊 **حالة VIP:** {'✅ نشط' if user.get('vip', False) else '❌ غير نشط'}
+━━━━━━━━━━━━━━━━
+📈 **إحصائيات الفحص:**
+▫️ إجمالي الفحوصات: {user.get('total_checks', 0)}
+▫️ بطاقات مقبولة: {user.get('approved_checks', 0)}
+▫️ نسبة النجاح: {success_rate:.1f}%
+━━━━━━━━━━━━━━━━
+🎫 **كود الإحالة:** `{user.get('referral_code', 'لا يوجد')}`
+👥 **عدد الإحالات:** {len(referrals_data.get(user_id, []))}
+━━━━━━━━━━━━━━━━
+🎁 كل شخص يسجل بكودك يمنحك 5 نقاط!
+"""
+
+# ===================================================================
+# ========================== دوال مساعدة ==========================
+# ===================================================================
+
 def luhn_checksum(card_number):
     def digits_of(n):
         return [int(d) for d in str(n)]
@@ -71,18 +449,32 @@ def generate_single_card(bin_prefix, month, year, cvv):
 def generate_cards_advanced(user_input, count=10):
     cards = []
     user_input = user_input.strip()
+    
+    # بينات متعددة (كل بين في سطر)
+    if '\n' in user_input and '|' not in user_input:
+        bins = [b.strip() for b in user_input.split('\n') if b.strip().isdigit() and len(b.strip()) >= 6]
+        if bins:
+            for _ in range(count):
+                chosen_bin = random.choice(bins)
+                month = str(random.randint(1, 12)).zfill(2)
+                year = str(random.randint(2026, 2031))
+                cvv = ''.join(random.choices(string.digits, k=3))
+                cards.append(generate_single_card(chosen_bin[:6], month, year, cvv))
+            return cards
+    
+    # بينات متعددة مفصولة بفواصل
     if ',' in user_input and '|' not in user_input:
-        bins = [b.strip() for b in user_input.split(',') if b.strip()]
-        if not bins:
-            return None
-        for _ in range(count):
-            chosen_bin = random.choice(bins)
-            month = str(random.randint(1, 12)).zfill(2)
-            year = str(random.randint(2026, 2031))
-            cvv = ''.join(random.choices(string.digits, k=3))
-            card = generate_single_card(chosen_bin, month, year, cvv)
-            cards.append(card)
-        return cards
+        bins = [b.strip() for b inuser_input.split(',') if b.strip()]
+        if bins:
+            for _ in range(count):
+                chosen_bin = random.choice(bins)
+                month = str(random.randint(1, 12)).zfill(2)
+                year = str(random.randint(2026, 2031))
+                cvv = ''.join(random.choices(string.digits, k=3))
+                cards.append(generate_single_card(chosen_bin[:6], month, year, cvv))
+            return cards
+    
+    # بين واحد
     if user_input.isdigit() and len(user_input) >= 6 and '|' not in user_input:
         bin_prefix = user_input[:6]
         for _ in range(count):
@@ -91,6 +483,8 @@ def generate_cards_advanced(user_input, count=10):
             cvv = ''.join(random.choices(string.digits, k=3))
             cards.append(generate_single_card(bin_prefix, month, year, cvv))
         return cards
+    
+    # نمط x
     if '|' in user_input:
         parts = user_input.split('|')
         if len(parts) >= 4:
@@ -98,10 +492,7 @@ def generate_cards_advanced(user_input, count=10):
             month = parts[1].strip().lower()
             year = parts[2].strip().lower()
             cvv_pattern = parts[3].strip().lower()
-            if 'x' in card_pattern.lower():
-                bin_prefix = card_pattern.lower().replace('x', '')
-            else:
-                bin_prefix = card_pattern
+            bin_prefix = card_pattern.lower().replace('x', '')
             for _ in range(count):
                 temp_bin = bin_prefix
                 if bin_prefix.startswith('3'):
@@ -114,9 +505,9 @@ def generate_cards_advanced(user_input, count=10):
                     if needed > 0:
                         random_digits = ''.join(random.choices(string.digits, k=needed))
                         temp_bin = bin_prefix + random_digits
-                card = generate_single_card(temp_bin, month, year, cvv_pattern)
-                cards.append(card)
+                cards.append(generate_single_card(temp_bin, month, year, cvv_pattern))
             return cards
+    
     return None
 
 def extract_cards_from_message(text):
@@ -141,114 +532,42 @@ def extract_cards_from_message(text):
                 break
     return cards
 
-def check_single_card(card, check_func, gateway_name):
+def get_bin_info(bin_code):
     try:
-        start = time.time()
-        result = str(check_func(card))
-        exec_time = time.time() - start
-        status = 'Approved ✅' if ('Approved' in result or '✅' in result) else 'Declined ❌'
-        return {
-            'card': card,
-            'status': status,
-            'response': result,
-            'time': exec_time,
-            'bin_info': dato(card[:6])
-        }
-    except Exception as e:
-        return {
-            'card': card,
-            'status': 'Error ❌',
-            'response': str(e),
-            'time': 0,
-            'bin_info': dato(card[:6])
-        }
-
-def check_cards_from_reply(message, check_func, gateway_name):
-    if not message.reply_to_message:
-        bot.reply_to(message, f"⚠️ قم بالرد على رسالة تحتوي على بطاقات\nمثال: {message.text} (مع الرد)")
-        return
-    cards = extract_cards_from_message(message.reply_to_message.text)
-    if not cards and message.reply_to_message.caption:
-        cards = extract_cards_from_message(message.reply_to_message.caption)
-    if not cards:
-        bot.reply_to(message, "❌ لم يتم العثور على بطاقات في الرسالة")
-        return
-    status_msg = bot.reply_to(message, f"🚀 جاري فحص {len(cards)} بطاقة عبر {gateway_name}...")
-    def run():
-        approved = 0
-        results = []
-        for card in cards:
-            result = check_single_card(card, check_func, gateway_name)
-            if 'Approved' in result['status']:
-                approved += 1
-            msg = f"""<b>{result['status']} | {gateway_name}</b>
-📇 <code>{card}</code>
-💬 {result['response']}
-{result['bin_info']}
-⏱️ {result['time']:.2f}s"""
-            bot.send_message(message.chat.id, msg, parse_mode="HTML")
-            results.append(msg)
-            time.sleep(3)
-        bot.edit_message_text(f"✅ اكتمل الفحص على {gateway_name}\n✅ Approved: {approved}\n❌ Declined: {len(cards)-approved}", message.chat.id, status_msg.message_id)
-    threading.Thread(target=run).start()
-
-def check_card_individual(message, check_func, gateway_name):
-    idt = message.from_user.id
-    try:
-        command_usage[idt]['last_time']
-    except:
-        command_usage[idt] = {'last_time': datetime.now()}
-    if command_usage[idt]['last_time'] is not None:
-        current_time = datetime.now()
-        time_diff = (current_time - command_usage[idt]['last_time']).seconds
-        if time_diff < 10:
-            bot.reply_to(message, f"<b>Try again after {10-time_diff} seconds.</b>", parse_mode="HTML")
-            return
-    ko = bot.reply_to(message, "- Wait checking your card ...").message_id
-    try:
-        cc = message.reply_to_message.text if message.reply_to_message else message.text
-    except:
-        cc = message.text
-    for prefix in ['/str1', '/str2', '/str3', '/str4', '/str5', '/str6', '/donate', '/br1', '/br2', '/chk1', '.str1', '.str2', '.str3', '.str4', '.str5', '.str6', '.donate', '.br1', '.br2', '.chk1']:
-        if cc.lower().startswith(prefix):
-            cc = cc[len(prefix):].strip()
-            break
-    cc = str(reg(cc))
-    if cc == 'None' or cc is None:
-        bot.edit_message_text('<b>🚫 Invalid format: XXXXXXXXXXXXXXXX|MM|YYYY|CVV</b>', message.chat.id, ko, parse_mode="HTML")
-        return
-    result = check_single_card(cc, check_func, gateway_name)
-    command_usage[idt]['last_time'] = datetime.now()
-    msg = f'''<strong>#{gateway_name} 🔥
-- - - - - - - - - - - - - - - - - - - - - - -
-[ϟ] 𝐂𝐚𝐫𝐝: <code>{cc}</code>
-[ϟ] 𝐒𝐭𝐚𝐭𝐮𝐬: <code>{result['status']}</code>
-[ϟ] 𝐑𝐞𝐬𝐩𝐨𝐧𝐬𝐞: <code>{result['response']}</code>
-- - - - - - - - - - - - - - - - - - - - - - -
-{result['bin_info']}
-- - - - - - - - - - - - - - - - - - - - - - -
-[⌥] 𝐓𝐢𝐦𝐞: <code>{result['time']:.2f}'s</code>
-[⌤] 𝐃𝐞𝐯: @s3s_a</strong>'''
-    try:
-        bot.edit_message_text(msg, message.chat.id, ko, parse_mode="HTML")
+        url = f"https://bins.antipublic.cc/bins/{bin_code}"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            d = r.json()
+            brand = d.get('brand', 'Unknown')
+            card_type = d.get('type', 'Unknown').upper()
+            level = d.get('level', 'Unknown')
+            bank = d.get('bank', 'Unknown')
+            country = d.get('country_name', 'Unknown')
+            flag = d.get('country_flag', '')
+            return f"""[ϟ] 𝐁𝐢𝐧: {brand} - {card_type} - {level}
+[ϟ] 𝐁𝐚𝐧𝐤: {bank} - {flag}
+[ϟ] 𝐂𝐨𝐮𝐧𝐭𝐫𝐲: {country} [ {flag} ]"""
     except:
         pass
-
-def dato(zh):
+    
     try:
-        api_url = requests.get("https://bins.antipublic.cc/bins/"+zh, verify=False).json()
-        brand = api_url["brand"]
-        card_type = api_url["type"]
-        level = api_url["level"]
-        bank = api_url["bank"]
-        country_name = api_url["country_name"]
-        country_flag = api_url["country_flag"]
-        mn = f'''[ϟ] 𝐁𝐢𝐧: <code>{brand} - {card_type} - {level}</code>
-[ϟ] 𝐁𝐚𝐧𝐤: <code>{bank} - {country_flag}</code>
-[ϟ] 𝐂𝐨𝐮𝐧𝐭𝐫𝐲: <code>{country_name} [ {country_flag} ]</code>'''
-        return mn
+        url = f"https://lookup.binlist.net/{bin_code}"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            d = r.json()
+            scheme = d.get('scheme', 'Unknown')
+            brand = scheme.upper() if scheme else 'UNKNOWN'
+            card_type = d.get('type', 'UNKNOWN').upper()
+            bank = d.get('bank', {}).get('name', 'Unknown')
+            country = d.get('country', {}).get('name', 'Unknown')
+            flag = d.get('country', {}).get('emoji', '')
+            return f"""[ϟ] 𝐁𝐢𝐧: {brand} - {card_type}
+[ϟ] 𝐁𝐚𝐧𝐤: {bank} - {flag}
+[ϟ] 𝐂𝐨𝐮𝐧𝐭𝐫𝐲: {country} [ {flag} ]"""
     except:
-        return 'No info'
+        pass
+    
+    return "[ϟ] 𝐁𝐢𝐧: Unknown"
 
 def get_fake_info(country):
     countries_data = {
@@ -258,17 +577,11 @@ def get_fake_info(country):
         "Germany": {"first":["Max","Alexander","Paul"], "last":["Müller","Schmidt","Schneider"], "address":["Hauptstrasse 1"], "city":["Berlin"], "state":["Berlin"], "zip":["10115"], "phone":["+49301234567"]},
         "France": {"first":["Lucas","Louis","Jules"], "last":["Martin","Bernard","Dubois"], "address":["10 Rue de la Paix"], "city":["Paris"], "state":["Paris"], "zip":["75001"], "phone":["+33123456789"]},
         "Italy": {"first":["Leonardo","Francesco","Alessandro"], "last":["Rossi","Russo","Ferrari"], "address":["Via Roma 1"], "city":["Rome"], "state":["RM"], "zip":["00100"], "phone":["+39061234567"]},
-        "Netherlands": {"first":["Daan","Sem","Lucas"], "last":["de Jong","Jansen","de Vries"], "address":["Damrak 1"], "city":["Amsterdam"], "state":["NH"], "zip":["1012AB"], "phone":["+31201234567"]},
-        "India": {"first":["Aarav","Vihaan","Vivaan"], "last":["Kumar","Sharma","Singh"], "address":["MG Road 1"], "city":["Mumbai"], "state":["MH"], "zip":["400001"], "phone":["+91221234567"]},
-        "Pakistan": {"first":["Muhammad","Ali","Hamza"], "last":["Khan","Malik","Butt"], "address":["Gulberg 1"], "city":["Karachi"], "state":["SD"], "zip":["74000"], "phone":["+92211234567"]},
-        "China": {"first":["Wei","Ming","Li"], "last":["Wang","Li","Zhang"], "address":["Chang'an Avenue 1"], "city":["Beijing"], "state":["BJ"], "zip":["100000"], "phone":["+86101234567"]},
-        "Russia": {"first":["Alexander","Dmitry","Maxim"], "last":["Ivanov","Smirnov","Kuznetsov"], "address":["Tverskaya Street 1"], "city":["Moscow"], "state":["MOW"], "zip":["101000"], "phone":["+74951234567"]},
-        "Switzerland": {"first":["Liam","Noah","Luca"], "last":["Meier","Müller","Schmid"], "address":["Bahnhofstrasse 1"], "city":["Zurich"], "state":["ZH"], "zip":["8000"], "phone":["+41441234567"]},
-        "South Korea": {"first":["Min-jun","Seo-jun","Ha-joon"], "last":["Kim","Lee","Park"], "address":["Gangnam-daero 1"], "city":["Seoul"], "state":["Seoul"], "zip":["04524"], "phone":["+82212345678"]},
-        "Japan": {"first":["Haruto","Sota","Yuto"], "last":["Sato","Suzuki","Takahashi"], "address":["Shibuya 1-1-1"], "city":["Tokyo"], "state":["Tokyo"], "zip":["100-0001"], "phone":["+81312345678"]}
     }
+    
     if country not in countries_data:
         country = "USA"
+    
     d = countries_data[country]
     first = random.choice(d["first"])
     last = random.choice(d["last"])
@@ -279,507 +592,711 @@ def get_fake_info(country):
     zipcode = random.choice(d["zip"]) if isinstance(d["zip"], list) else d["zip"]
     phone = random.choice(d["phone"]) if isinstance(d["phone"], list) else d["phone"]
     email = f"{first.lower()}.{last.lower()}{random.randint(1,999)}@gmail.com"
-    return f"""🌍 **Fake Info - {country}**
+    
+    return f"""🌍 **بيانات شحن - {country}**
 ━━━━━━━━━━━━━━━━
-👤 **Name:** {name}
-📧 **Email:** {email}
-🏠 **Address:** {address}
-🌆 **City:** {city}
-📍 **State:** {state}
-📮 **Postal:** {zipcode}
-📞 **Phone:** {phone}
+👤 **الاسم:** {name}
+📧 **البريد:** {email}
+🏠 **العنوان:** {address}
+🌆 **المدينة:** {city}
+📍 **الولاية:** {state}
+📮 **الرمز البريدي:** {zipcode}
+📞 **الهاتف:** {phone}
 ━━━━━━━━━━━━━━━━"""
 
-def check_bin_advanced(bin_code):
-    bin_code = str(bin_code)[:6]
-    try:
-        url = f"https://bins.antipublic.cc/bins/{bin_code}"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            d = r.json()
-            return f"""🔍 **BIN CHECK** | antipublic
-━━━━━━━━━━━━━━━━
-💳 **BIN:** `{bin_code}`
-🏷️ **Brand:** {d.get('brand', 'Unknown')}
-📌 **Type:** {d.get('type', 'Unknown').upper()}
-⭐ **Level:** {d.get('level', 'Unknown')}
-🏦 **Bank:** {d.get('bank', 'Unknown')}
-🌍 **Country:** {d.get('country_name', 'Unknown')} {d.get('country_flag', '')}"""
-    except:
-        pass
-    try:
-        url = f"https://lookup.binlist.net/{bin_code}"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            d = r.json()
-            bank = d.get('bank', {}).get('name', 'Unknown')
-            country = d.get('country', {}).get('name', 'Unknown')
-            flag = d.get('country', {}).get('emoji', '')
-            return f"""🔍 **BIN CHECK** | binlist
-━━━━━━━━━━━━━━━━
-💳 **BIN:** `{bin_code}`
-🏷️ **Brand:** {d.get('scheme', 'Unknown')}
-📌 **Type:** {d.get('type', 'Unknown').upper()}
-🏦 **Bank:** {bank}
-🌍 **Country:** {country} {flag}"""
-    except:
-        pass
-    return "⚠️ Could not fetch BIN info"
+def format_result(gateway_name, card, status, response, bin_info, exec_time):
+    """تنسيق نتيجة الفحص"""
+    status_emoji = "✅" if "Approved" in status else "❌"
+    return f"""<b>#{gateway_name} 🔥</b>
+- - - - - - - - - - - - - - - - - - - - - - -
+[ϟ] 𝐂𝐚𝐫𝐝: <code>{card}</code>
+[ϟ] 𝐒𝐭𝐚𝐭𝐮𝐬: {status_emoji} {status}
+[ϟ] 𝐑𝐞𝐬𝐩𝐨𝐧𝐬𝐞: {response}
+- - - - - - - - - - - - - - - - - - - - - - -
+{bin_info}
+- - - - - - - - - - - - - - - - - - - - - - -
+[⌥] 𝐓𝐢𝐦𝐞: <code>{exec_time:.2f}'s</code>
+[⌤] 𝐃𝐞𝐯: @s3s_a</b>"""
 
-# ==================== القوائم ====================
-def main_menu():
-    m = types.InlineKeyboardMarkup(row_width=2)
-    m.add(
-        types.InlineKeyboardButton("🔐 Card Checker", callback_data="menu_checker"),
-        types.InlineKeyboardButton("🃏 Generator", callback_data="menu_generator"),
-        types.InlineKeyboardButton("🔍 BIN Checker", callback_data="menu_bin"),
-        types.InlineKeyboardButton("🆔 Fake Info", callback_data="menu_fake")
-    )
-    return m
-
-def checker_menu():
-    m = types.InlineKeyboardMarkup(row_width=2)
-    m.add(
-        types.InlineKeyboardButton("💰 Stripe", callback_data="stripe_menu"),
-        types.InlineKeyboardButton("💳 Braintree", callback_data="braintree_menu"),
-        types.InlineKeyboardButton("🔙 Back", callback_data="back_main")
-    )
-    return m
-
-def stripe_list():
-    m = types.InlineKeyboardMarkup(row_width=2)
-    for name, code in [("Stripe1","st1"),("Stripe2","st2"),("Stripe3","st3"),("Stripe4","st4"),("Stripe5","st5"),("Stripe6","st6"),("Donate","donate")]:
-        m.add(types.InlineKeyboardButton(name, callback_data=f"gw_{code}"))
-    m.add(types.InlineKeyboardButton("🔙 Back", callback_data="back_checker"))
-    return m
-
-def braintree_list():
-    m = types.InlineKeyboardMarkup(row_width=2)
-    for name, code in [("Braintree1","br1"),("Braintree2","br2"),("BraintreeCharge","chk1")]:
-        m.add(types.InlineKeyboardButton(name, callback_data=f"gw_{code}"))
-    m.add(types.InlineKeyboardButton("🔙 Back", callback_data="back_checker"))
-    return m
-
-def combo_type_menu():
-    m = types.InlineKeyboardMarkup(row_width=2)
-    m.add(
-        types.InlineKeyboardButton("💰 Stripe", callback_data="combo_stripe"),
-        types.InlineKeyboardButton("💳 Braintree", callback_data="combo_braintree"),
-        types.InlineKeyboardButton("❌ Cancel", callback_data="combo_cancel")
-    )
-    return m
-
-# ==================== الأوامر ====================
-@bot.message_handler(commands=["start"])
-def handle_start(message):
-    sent_message = bot.send_message(chat_id=message.chat.id, text="💥 Starting...")
-    time.sleep(1)
-    name = message.from_user.first_name
-    bot.edit_message_text(
-        chat_id=message.chat.id,
-        message_id=sent_message.message_id,
-        text=f"Hi {name}, Welcome To Auth Checker",
-        reply_markup=main_menu()
-    )
-
-@bot.message_handler(commands=['mass'])
-def mass_check_command(message):
-    if not message.reply_to_message:
-        bot.reply_to(message, "⚠️ قم بالرد على رسالة تحتوي على بطاقات\nمثال: /mass (مع الرد على رسالة البطاقات)")
+def check_single_card_msg(message, check_func, gateway_name):
+    """فحص بطاقة مفردة"""
+    user_id = message.from_user.id
+    
+    if not check_points(user_id):
         return
+    
+    status_msg = bot.reply_to(message, "⏳ جاري الفحص...")
+    
+    try:
+        if message.reply_to_message:
+            text = message.reply_to_message.text
+        else:
+            text = message.text
+            text = re.sub(r'^/[a-z0-9]+', '', text).strip()
+        
+        card = reg(text)
+        if not card:
+            bot.edit_message_text("❌ صيغة غير صحيحة\nالصيغة: XXXXXXXXXXXXXXXX|MM|YYYY|CVV", message.chat.id, status_msg.message_id)
+            return
+        
+        start = time.time()
+        try:
+            result = str(check_func(card))
+            exec_time = time.time() - start
+            status = "Approved" if ("Approved" in result or "✅" in result) else "Declined"
+            bin_info = get_bin_info(card[:6])
+            msg = format_result(gateway_name, card, status, result, bin_info, exec_time)
+            
+            # تسجيل النتيجة
+            record_check_result(user_id, "Approved" in status)
+            
+        except Exception as e:
+            error_msg = str(e)
+            exec_time = time.time() - start
+            msg = format_result(gateway_name, card, "Error", error_msg[:100], get_bin_info(card[:6]), exec_time)
+            record_check_result(user_id, False)
+            
+            # الإبلاغ عن مشكلة في البوابة
+            if "ConnectionError" in error_msg or "Timeout" in error_msg or "block" in error_msg.lower():
+                report_gateway_issue(gateway_name, error_msg)
+        
+        bot.edit_message_text(msg, message.chat.id, status_msg.message_id, parse_mode="HTML")
+        
+    except Exception as e:
+        bot.edit_message_text(f"❌ خطأ: {str(e)}", message.chat.id, status_msg.message_id)
+
+def check_multiple_cards(message, check_func, gateway_name):
+    """فحص عدة بطاقات من رسالة"""
+    user_id = message.from_user.id
     cards = extract_cards_from_message(message.reply_to_message.text)
-    if not cards and message.reply_to_message.caption:
-        cards = extract_cards_from_message(message.reply_to_message.caption)
+    
     if not cards:
-        bot.reply_to(message, "❌ لم يتم العثور على بطاقات في الرسالة")
+        bot.reply_to(message, "❌ لم يتم العثور على بطاقات")
         return
-    pending_mass_cards[message.from_user.id] = cards
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    gateways = [
-        ("Stripe1", "mass_st1"), ("Stripe2", "mass_st2"), ("Stripe3", "mass_st3"),
-        ("Stripe4", "mass_st4"), ("Stripe5", "mass_st5"), ("Stripe6", "mass_st6"),
-        ("Donate", "mass_donate"),
-        ("Braintree1", "mass_br1"), ("Braintree2", "mass_br2"), ("BraintreeCharge", "mass_chk1")
-    ]
-    for name, code in gateways:
-        markup.add(types.InlineKeyboardButton(name, callback_data=code))
-    markup.add(types.InlineKeyboardButton("🔙 إلغاء", callback_data="mass_cancel"))
-    bot.reply_to(message, f"📊 تم العثور على {len(cards)} بطاقة\nاختر بوابة الفحص:", reply_markup=markup)
+    
+    if not check_points(user_id, len(cards)):
+        return
+    
+    status_msg = bot.reply_to(message, f"🚀 جاري فحص {len(cards)} بطاقة...")
+    
+    def run():
+        approved = 0
+        for i, card in enumerate(cards, 1):
+            try:
+                start = time.time()
+                result = str(check_func(card))
+                exec_time = time.time() - start
+                status = "Approved" if ("Approved" in result or "✅" in result) else "Declined"
+                if "Approved" in status:
+                    approved += 1
+                bin_info = get_bin_info(card[:6])
+                msg = format_result(gateway_name, card, status, result, bin_info, exec_time)
+                bot.send_message(message.chat.id, msg, parse_mode="HTML")
+                record_check_result(user_id, "Approved" in status)
+                bot.send_message(message.chat.id, f"📊 تقدم: {i}/{len(cards)} | ✅ {approved}")
+                time.sleep(5)
+            except Exception as e:
+                bot.send_message(message.chat.id, f"❌ خطأ في {card}: {str(e)}")
+                record_check_result(user_id, False)
+        
+        bot.edit_message_text(f"✅ اكتمل الفحص\n✅ مقبولة: {approved}\n❌ مرفوضة: {len(cards)-approved}", message.chat.id, status_msg.message_id)
+    
+    threading.Thread(target=run).start()
+
+# ===================================================================
+# ========================== الأوامر ==========================
+# ===================================================================
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    user_id = message.from_user.id
+    username = message.from_user.username
+    first_name = message.from_user.first_name
+    
+    # التحقق من وجود كود إحالة
+    referrer_id = None    if len(message.text.split()) > 1:
+        ref_code = message.text.split()[1]
+        # البحث عن المستخدم صاحب الكود
+        for uid, data in users_data.items():
+            if data.get("referral_code") == ref_code and int(uid) != user_id:
+                referrer_id = int(uid)
+                break
+    
+    # إنشاء المستخدم
+    create_user(user_id, username, first_name, referrer_id)
+    
+    welcome_msg = f"""
+✨ **مرحبا بك {first_name}** ✨
+━━━━━━━━━━━━━━━━━━━━━━━
+🇪🇬 بوت فحص فيزات متطور
+💳 يدعم 6 بوابات Stripe + 2 Braintree
+⚡ فحص فردي + فحص جماعي + توليد
+━━━━━━━━━━━━━━━━━━━━━━━
+⭐ **رصيدك الابتدائي:** 10 نقاط
+🎫 **كود الإحالة الخاص بك:** `{users_data[str(user_id)]['referral_code']}`
+━━━━━━━━━━━━━━━━━━━━━━━
+📌 استخدم الأزرار أدناه للبدء
+"""
+    bot.send_message(message.chat.id, welcome_msg, reply_markup=main_menu())
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/str1', '.str1')))
+def cmd_str1(m):
+    check_single_card_msg(m, Stripe1, "Stripe1")
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/str2', '.str2')))
+def cmd_str2(m):
+    check_single_card_msg(m, Stripe2, "Stripe2")
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/str3', '.str3')))
+def cmd_str3(m):
+    check_single_card_msg(m, Stripe3, "Stripe3")
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/str4', '.str4')))
+def cmd_str4(m):
+    check_single_card_msg(m, Stripe4, "Stripe4")
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/str5', '.str5')))
+def cmd_str5(m):
+    check_single_card_msg(m, Stripe5, "Stripe5")
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/str6', '.str6')))
+def cmd_str6(m):
+    check_single_card_msg(m, Stripe6, "Stripe6")
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/br1', '.br1')))
+def cmd_br1(m):
+    check_single_card_msg(m, bra1, "Braintree1")
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/br2', '.br2')))
+def cmd_br2(m):
+    check_single_card_msg(m, bra2, "Braintree2")
+
+@bot.message_handler(func=lambda m: m.text.startswith(('/donate', '.donate')))
+def cmd_donate(m):
+    check_single_card_msg(m, Donate, "Donate")
+
+@bot.message_handler(commands=['chb'])
+def cmd_chb(m):
+    check_single_card_msg(m, BraC, "BraintreeCharge")
 
 @bot.message_handler(commands=['gen'])
-def generate_cards_command(message):
+def gen_command(message):
+    user_id = message.from_user.id
+    parts = message.text.split(maxsplit=1)
+    
+    if len(parts) < 2:
+        bot.reply_to(message, "⚠️ أرسل البين أو النمط\nمثال:\n`/gen 528445`\n`/gen 400519,528445,518928`\n`/gen 410621xxxx|12|29|xxx`", parse_mode="Markdown")
+        return
+    
+    pattern = parts[1].strip()
+    pending_gen_count[user_id] = pattern
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    for count in [5, 10, 20, 50, 100]:
+        markup.add(types.InlineKeyboardButton(f"{count} بطاقة", callback_data=f"gen_count_{count}"))
+    bot.reply_to(message, "📊 اختر عدد البطاقات:", reply_markup=markup)
+
+@bot.message_handler(commands=['mass'])
+def mass_command(message):
+    if not message.reply_to_message:
+        bot.reply_to(message, "⚠️ قم بالرد على رسالة تحتوي على بطاقات")
+        return
+    
+    cards = extract_cards_from_message(message.reply_to_message.text)
+    if not cards:
+        bot.reply_to(message, "❌ لم يتم العثور على بطاقات")
+        return
+    
+    # التحقق من النقاط قبل عرض القائمة
+    if not check_points(message.from_user.id, len(cards)):
+        return
+    
+    pending_mass_cards[message.from_user.id] = cards
+    bot.reply_to(message, f"📊 تم العثور على {len(cards)} بطاقة\nاختر بوابة الفحص:", reply_markup=mass_gateway_menu())
+
+@bot.message_handler(commands=['addpoints'])
+def add_points_command(message):
+    """أمر خاص للأدمن لإضافة نقاط"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
     try:
-        parts = message.text.split(maxsplit=2)
-        if len(parts) < 2:
-            bot.reply_to(message, "⚠️ استخدم: /gen <BIN/pattern> <count>\nمثال:\n/gen 528445 20\n/gen 400519,528445,518928 15\n/gen 410621xxxx|12|29|xxx 10")
-            return
-        pattern = parts[1]
-        count = int(parts[2]) if len(parts) > 2 else 10
-        if count > 100:
-            bot.reply_to(message, "⚠️ الحد الأقصى 100 بطاقة في المرة")
-            return
-        cards = generate_cards_advanced(pattern, count)
-        if not cards:
-            bot.reply_to(message, "❌ صيغة غير صحيحة")
-            return
-        pending_cards[message.from_user.id] = cards
-        markup = types.InlineKeyboardMarkup()
+        parts = message.text.split()
+        user_id = int(parts[1])
+        points = int(parts[2])
+        reason = " ".join(parts[3:]) if len(parts) > 3 else "شحن رصيد"
+        add_points(user_id, points, reason)
+        bot.reply_to(message, f"✅ تم إضافة {points} نقطة للمستخدم {user_id}")
+    except:
+        bot.reply_to(message, "❌ الاستخدام: /addpoints <user_id> <points> <reason>")
+
+@bot.message_handler(commands=['ban'])
+def ban_command(message):
+    """حظر مستخدم"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        parts = message.text.split()
+        user_id = str(parts[1])
+        if user_id in users_data:
+            users_data[user_id]["banned"] = True
+            save_users(users_data)
+            bot.reply_to(message, f"✅ تم حظر المستخدم {user_id}")
+            bot.send_message(int(user_id), "🚫 تم حظر حسابك من البوت")
+    except:
+        bot.reply_to(message, "❌ الاستخدام: /ban <user_id>")
+
+@bot.message_handler(commands=['unban'])
+def unban_command(message):
+    """رفع الحظر عن مستخدم"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        parts = message.text.split()
+        user_id = str(parts[1])
+        if user_id in users_data:
+            users_data[user_id]["banned"] = False
+            save_users(users_data)
+            bot.reply_to(message, f"✅ تم فك الحظر عن المستخدم {user_id}")
+            bot.send_message(int(user_id), "✅ تم فك الحظر عن حسابك")
+    except:
+        bot.reply_to(message, "❌ الاستخدام: /unban <user_id>")
+
+@bot.message_handler(commands=['stats'])
+def stats_command(message):
+    """إحصائيات البوت للأدمن"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    total_users = len(users_data)
+    total_checks = sum(u.get("total_checks", 0) for u in users_data.values())
+    total_approved = sum(u.get("approved_checks", 0) for u in users_data.values())
+    vip_users = sum(1 for u in users_data.values() if u.get("vip", False))
+    banned_users = sum(1 for u in users_data.values() if u.get("banned", False))
+    
+    stats = f"""
+📊 **إحصائيات البوت**
+━━━━━━━━━━━━━━━━
+👥 **المستخدمين:** {total_users}
+⭐ **VIP:** {vip_users}
+🚫 **محظورين:** {banned_users}
+━━━━━━━━━━━━━━━━
+💳 **إجمالي الفحوصات:** {total_checks}
+✅ **الفحوصات المقبولة:** {total_approved}
+📈 **نسبة النجاح:** {(total_approved/total_checks*100) if total_checks > 0 else 0:.1f}%
+━━━━━━━━━━━━━━━━
+⚠️ **مشاكل البوابات:** {len(incidents_data)}
+"""
+    bot.reply_to(message, stats)
+
+@bot.message_handler(func=lambda m: m.text and ('|' in m.text) and len(m.text.split('|')) >= 3)
+def auto_detect_card(message):
+    """كشف تلقائي للبطاقة وعرض خيارات الفحص"""
+    cards = extract_cards_from_message(message.text)
+    if cards:
+        markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("📤 إرسال في الشات", callback_data=f"send_chat_{message.from_user.id}"),
-            types.InlineKeyboardButton("💾 حفظ في ملف", callback_data=f"save_file_{message.from_user.id}")
+            types.InlineKeyboardButton("🔐 Auth", callback_data=f"quick_auth_{message.message_id}"),
+            types.InlineKeyboardButton("💳 Charge", callback_data=f"quick_charge_{message.message_id}")
         )
-        bot.reply_to(message, f"🎴 تم توليد {len(cards)} بطاقة\nاختر طريقة الإرسال:", reply_markup=markup)
-    except ValueError:
-        bot.reply_to(message, "⚠️ العدد يجب أن يكون رقماً")
+        bot.reply_to(message, "💳 تم اكتشاف بطاقة/بطاقات\nاختر نوع الفحص:", reply_markup=markup)
+
+@bot.message_handler(content_types=['document'])
+def handle_file(message):
+    user_id = message.from_user.id
+    try:
+        file_info = bot.get_file(message.document.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        filename = f"combo_{user_id}_{int(time.time())}.txt"
+        with open(filename, "wb") as f:
+            f.write(downloaded)
+        
+        # حساب عدد البطاقات في الملف
+        with open(filename, 'r') as f:
+            lines = [l.strip() for l in f if l.strip()]
+            card_count = len(lines)
+        
+        # التحقق من النقاط
+        if not check_points(user_id, card_count):
+            os.remove(filename)
+            return
+        
+        pending_user_files[user_id] = filename
+        bot.reply_to(message, f"📁 تم رفع الملف\n📊 عدد البطاقات: {card_count}\n🎫 سيتم خصم {card_count} نقطة\nاختر نوع البوابات:", reply_markup=file_auth_menu())
     except Exception as e:
         bot.reply_to(message, f"❌ خطأ: {str(e)}")
 
-# ==================== أوامر الفحص (str1, br1, chk1, donate) ====================
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/str1') or m.text.lower().startswith('.str1'))
-def stripe1_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, Stripe1, "Stripe1")
-    else:
-        check_card_individual(m, Stripe1, "Stripe1")
+@bot.message_handler(func=lambda m: m.text and m.text.lower() in ["usa", "uk", "canada", "germany", "france", "italy"])
+def fake_info_command(message):
+    bot.reply_to(message, get_fake_info(message.text.capitalize()), parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/str2') or m.text.lower().startswith('.str2'))
-def stripe2_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, Stripe2, "Stripe2")
-    else:
-        check_card_individual(m, Stripe2, "Stripe2")
+@bot.message_handler(func=lambda m: m.text and m.text.isdigit() and 6 <= len(m.text) <= 8)
+def bin_command(message):
+    bin_code = message.text[:6]
+    bot.reply_to(message, get_bin_info(bin_code), parse_mode="HTML")
 
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/str3') or m.text.lower().startswith('.str3'))
-def stripe3_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, Stripe3, "Stripe3")
-    else:
-        check_card_individual(m, Stripe3, "Stripe3")
+# ===================================================================
+# ========================== معالج الأزرار ==========================
+# ===================================================================
 
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/str4') or m.text.lower().startswith('.str4'))
-def stripe4_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, Stripe4, "Stripe4")
-    else:
-        check_card_individual(m, Stripe4, "Stripe4")
-
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/str5') or m.text.lower().startswith('.str5'))
-def stripe5_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, Stripe5, "Stripe5")
-    else:
-        check_card_individual(m, Stripe5, "Stripe5")
-
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/str6') or m.text.lower().startswith('.str6'))
-def stripe6_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, Stripe6, "Stripe6")
-    else:
-        check_card_individual(m, Stripe6, "Stripe6")
-
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/donate') or m.text.lower().startswith('.donate'))
-def donate_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, Donate, "Donate")
-    else:
-        check_card_individual(m, Donate, "Donate")
-
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/br1') or m.text.lower().startswith('.br1'))
-def br1_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, bra1, "Braintree1")
-    else:
-        check_card_individual(m, bra1, "Braintree1")
-
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/br2') or m.text.lower().startswith('.br2'))
-def br2_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, bra2, "Braintree2")
-    else:
-        check_card_individual(m, bra2, "Braintree2")
-
-@bot.message_handler(func=lambda m: m.text.lower().startswith('/chk1') or m.text.lower().startswith('.chk1'))
-def chk1_cmd(m):
-    if m.reply_to_message:
-        check_cards_from_reply(m, BraC, "BraintreeCharge")
-    else:
-        check_card_individual(m, BraC, "BraintreeCharge")
-
-# ==================== معالج الملفات ====================
-@bot.message_handler(content_types=['document'])
-def handle_doc(m):
-    user = str(m.from_user.id)
-    try:
-        info = bot.get_file(m.document.file_id)
-        down = bot.download_file(info.file_path)
-        filename = f"combo_{user}_{int(time.time())}.txt"
-        with open(filename, "wb") as f:
-            f.write(down)
-        user_file[user] = filename
-        bot.reply_to(m, "📁 Select gateway type:", reply_markup=combo_type_menu())
-    except Exception as e:
-        bot.reply_to(m, f"❌ Error: {e}")
-
-# ==================== معالج الكولباك الرئيسي ====================
 @bot.callback_query_handler(func=lambda call: True)
-def handle_callback(call):
+def handle_callbacks(call):
     data = call.data
     user_id = call.from_user.id
     
-    # قوائم التنقل
-    if data == "menu_checker":
-        bot.edit_message_text("Select gateway type:", call.message.chat.id, call.message.message_id, reply_markup=checker_menu())
-    elif data == "menu_generator":
-        bot.send_message(call.message.chat.id, "🃏 استخدم الامر `/gen`\nمثال:\n/gen 528445 20\n/gen 400519,528445,518928 15\n/gen 410621xxxx|12|29|xxx 10")
-        bot.answer_callback_query(call.id)
-    elif data == "menu_bin":
-        bot.send_message(call.message.chat.id, "🔍 ارسل BIN: `410621`")
-        bot.answer_callback_query(call.id)
-    elif data == "menu_fake":
-        bot.send_message(call.message.chat.id, "🆔 ارسل الدولة: USA, UK, Canada, Germany, France, Italy, Netherlands, India, Pakistan, China, Russia, Switzerland, South Korea, Japan")
-        bot.answer_callback_query(call.id)
-    elif data == "back_main":
-        bot.edit_message_text("✨ Choose option:", call.message.chat.id, call.message.message_id, reply_markup=main_menu())
-    elif data == "back_checker":
-        bot.edit_message_text("Select gateway type:", call.message.chat.id, call.message.message_id, reply_markup=checker_menu())
-    elif data == "stripe_menu":
-        bot.edit_message_text("Select Stripe:", call.message.chat.id, call.message.message_id, reply_markup=stripe_list())
-    elif data == "braintree_menu":
-        bot.edit_message_text("Select Braintree:", call.message.chat.id, call.message.message_id, reply_markup=braintree_list())
+    # ========== قوائم التنقل ==========
+    if data == "back_main":
+        bot.edit_message_text("✨ القائمة الرئيسية", call.message.chat.id, call.message.message_id, reply_markup=main_menu())
     
-    # الفحص اليدوي من القائمة
-    elif data.startswith("gw_"):
-        gw = data.replace("gw_", "")
-        names = {"st1":"Stripe1","st2":"Stripe2","st3":"Stripe3","st4":"Stripe4","st5":"Stripe5","st6":"Stripe6","donate":"Donate","br1":"Braintree1","br2":"Braintree2","chk1":"BraintreeCharge"}
-        bot.send_message(call.message.chat.id, f"📇 ارسل البطاقة لـ {names.get(gw,gw)}:\n`XXXX|MM|YYYY|CVV`", parse_mode="Markdown")
-        pending_gateway[str(user_id)] = gw
+    elif data == "check_menu":
+        bot.edit_message_text("🔍 اختر نوع الفحص:", call.message.chat.id, call.message.message_id, reply_markup=check_menu())
+    
+    elif data == "auth_menu":
+        bot.edit_message_text("🔐 اختر بوابة Auth:", call.message.chat.id, call.message.message_id, reply_markup=auth_menu())
+    
+    elif data == "charge_menu":
+        bot.edit_message_text("💳 اختر بوابة Charge:", call.message.chat.id, call.message.message_id, reply_markup=charge_menu())
+    
+    elif data == "braintree_auth_menu":
+        bot.edit_message_text("💳 بوابات Braintree Auth:", call.message.chat.id, call.message.message_id, reply_markup=braintree_auth_menu())
+    
+    elif data == "stripe_auth_menu":
+        bot.edit_message_text("💰 بوابات Stripe Auth:", call.message.chat.id, call.message.message_id, reply_markup=stripe_auth_menu())
+    
+    elif data == "gen_menu":
+        bot.edit_message_text("🎴 اختر طريقة التوليد:", call.message.chat.id, call.message.message_id, reply_markup=gen_menu())
+    
+    elif data == "bin_menu":
+        bot.edit_message_text("🔍 أرسل الـ BIN (6-8 أرقام)", call.message.chat.id, call.message.message_id)
         bot.answer_callback_query(call.id)
     
-    # معالجة البطاقات المولدة
-    elif data.startswith('send_chat_') or data.startswith('save_file_'):
-        uid = int(data.split('_')[2]) if len(data.split('_')) > 2 else user_id
-        if uid not in pending_cards:
-            bot.answer_callback_query(call.id, "❌ لا توجد بطاقات")
-            return
-        cards = pending_cards[uid]
-        if data.startswith('send_chat_'):
-            msg_lines = [f"<code>{card}</code>" for card in cards]
-            full_msg = "\n".join(msg_lines)
-            if len(full_msg) > 4000:
-                filename = f"generated_{uid}.txt"
-                with open(filename, 'w') as f:
-                    f.write('\n'.join(cards))
-                with open(filename, 'rb') as f:
-                    bot.send_document(call.message.chat.id, f, caption=f"🎴 {len(cards)} بطاقة مولدة")
+    elif data == "fake_menu":
+        bot.edit_message_text("🌍 أرسل اسم الدولة:\nUSA - UK - Canada - Germany - France - Italy", call.message.chat.id, call.message.message_id)
+        bot.answer_callback_query(call.id)
+    
+    elif data == "file_menu":
+        bot.edit_message_text("📁 أرسل ملف txt يحتوي على بطاقات", call.message.chat.id, call.message.message_id, reply_markup=file_menu())
+    
+    elif data == "mass_check_menu":
+        bot.edit_message_text("📊 قم بالرد على رسالة تحتوي على بطاقات ثم ارسل /mass", call.message.chat.id, call.message.message_id)
+        bot.answer_callback_query(call.id)
+    
+    elif data == "help_menu":
+        bot.edit_message_text(help_menu_content(), call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main")))
+    
+    elif data == "profile_menu":
+        bot.edit_message_text(profile_menu(user_id), call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main")))
+    
+    elif data == "referral_menu":
+        user = users_data.get(str(user_id), {})
+        ref_code = user.get("referral_code", "")
+        bot.edit_message_text(
+            f"🎁 **نظام الإحالات**\n━━━━━━━━━━━━━━━━\n"
+            f"📋 **كود الإحالة الخاص بك:**\n`{ref_code}`\n\n"
+            f"🔗 **رابط الإحالة:**\n`https://t.me/{bot.get_me().username}?start={ref_code}`\n\n"
+            f"⭐ **المكافأة:** 5 نقاط لكل مستخدم يسجل بكودك\n"
+            f"👥 **عدد إحالاتك:** {len(referrals_data.get(str(user_id), []))}",
+            call.message.chat.id, call.message.message_id, parse_mode="Markdown",
+            reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main"))
+        )
+    
+    elif data == "stats_menu":
+        user = users_data.get(str(user_id), {})
+        success_rate = 0
+        total = user.get("total_checks", 0)
+        approved = user.get("approved_checks", 0)
+        if total > 0:
+            success_rate = (approved / total) * 100
+        
+        bot.edit_message_text(
+            f"📈 **إحصائياتي**\n━━━━━━━━━━━━━━━━\n"
+            f"📊 إجمالي الفحوصات: {total}\n"
+            f"✅ الفحوصات المقبولة: {approved}\n"
+            f"❌ الفحوصات المرفوضة: {total - approved}\n"
+            f"📈 نسبة النجاح: {success_rate:.1f}%\n"
+            f"⭐ النقاط المتبقية: {user.get('points', 0)}\n"
+            f"👥 عدد الإحالات: {len(referrals_data.get(str(user_id), []))}",
+            call.message.chat.id, call.message.message_id,
+            reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔙 رجوع", callback_data="back_main"))
+        )
+    
+    elif data == "file_auth_menu":
+        bot.edit_message_text("📁 اختر نوع Auth:", call.message.chat.id, call.message.message_id, reply_markup=file_auth_menu())
+    
+    elif data == "file_charge_menu":
+        bot.edit_message_text("📁 اختر نوع Charge:", call.message.chat.id, call.message.message_id, reply_markup=file_charge_menu())
+    
+    elif data == "file_stripe_list":
+        bot.edit_message_text("💰 اختر بوابة Stripe:", call.message.chat.id, call.message.message_id, reply_markup=file_stripe_list())
+    
+    elif data == "file_braintree_list":
+        bot.edit_message_text("💳 اختر بوابة Braintree:", call.message.chat.id, call.message.message_id, reply_markup=file_braintree_list())
+    
+    # ========== توليد البطاقات ==========
+    elif data.startswith("gen_count_"):
+        count = int(data.replace("gen_count_", ""))
+        pattern = pending_gen_count.get(user_id, "")
+        if pattern:
+            cards = generate_cards_advanced(pattern, count)
+            if cards:
+                pending_cards[user_id] = cards
+                markup = types.InlineKeyboardMarkup()
+                markup.add(
+                    types.InlineKeyboardButton("📤 عرض في الشات", callback_data="send_chat"),
+                    types.InlineKeyboardButton("📁 حفظ كملف", callback_data="save_file")
+                )
+                bot.edit_message_text(f"🎴 تم توليد {len(cards)} بطاقة\nاختر طريقة العرض:", call.message.chat.id, call.message.message_id, reply_markup=markup)
+            else:
+                bot.edit_message_text("❌ صيغة غير صحيحة", call.message.chat.id, call.message.message_id)
+    
+    elif data == "send_chat":
+        if user_id in pending_cards:
+            cards = pending_cards[user_id]
+            msg = "\n".join([f"<code>{c}</code>" for c in cards])
+            if len(msg) > 4000:
+                filename = f"cards_{user_id}.txt"
+                with open(filename, "w") as f:
+                    f.write("\n".join(cards))
+                with open(filename, "rb") as f:
+                    bot.send_document(call.message.chat.id, f)
                 os.remove(filename)
             else:
-                bot.send_message(call.message.chat.id, f"🎴 **البطاقات المولدة**\n━━━━━━━━━━━━━━━━\n{full_msg}", parse_mode="HTML")
+                bot.send_message(call.message.chat.id, f"🎴 **البطاقات المولدة**\n{msg}", parse_mode="HTML")
             bot.answer_callback_query(call.id, "✅ تم الإرسال")
-        elif data.startswith('save_file_'):
-            filename = f"cards_{uid}_{int(time.time())}.txt"
-            with open(filename, 'w') as f:
-                f.write('\n'.join(cards))
-            with open(filename, 'rb') as f:
-                bot.send_document(call.message.chat.id, f, caption=f"🎴 {len(cards)} بطاقة مولدة")
+    
+    elif data == "save_file":
+        if user_id in pending_cards:
+            cards = pending_cards[user_id]
+            filename = f"cards_{user_id}_{int(time.time())}.txt"
+            with open(filename, "w") as f:
+                f.write("\n".join(cards))
+            with open(filename, "rb") as f:
+                bot.send_document(call.message.chat.id, f)
             os.remove(filename)
             bot.answer_callback_query(call.id, "✅ تم الحفظ")
-        del pending_cards[uid]
-        try:
-            bot.delete_message(call.message.chat.id, call.message.message_id)
-        except:
-            pass
     
-    # معالجة الفحص الجماعي /mass
-    elif data.startswith('mass_'):
-        gw_code = data.replace('mass_', '')
-        if gw_code == 'cancel':
-            if user_id in pending_mass_cards:
-                del pending_mass_cards[user_id]
-            bot.edit_message_text("❌ تم الإلغاء", call.message.chat.id, call.message.message_id)
-            bot.answer_callback_query(call.id)
-            return
-        if user_id not in pending_mass_cards:
-            bot.answer_callback_query(call.id, "❌ لا توجد بطاقات")
-            return
-        cards = pending_mass_cards[user_id]
-        gw_map = {
-            "st1": Stripe1, "st2": Stripe2, "st3": Stripe3, "st4": Stripe4, "st5": Stripe5, "st6": Stripe6,
-            "donate": Donate,
-            "br1": bra1, "br2": bra2, "chk1": BraC
-        }
-        name_map = {
-            "st1": "Stripe1", "st2": "Stripe2", "st3": "Stripe3", "st4": "Stripe4", "st5": "Stripe5", "st6": "Stripe6",
-            "donate": "Donate",
-            "br1": "Braintree1", "br2": "Braintree2", "chk1": "BraintreeCharge"
-        }
-        if gw_code not in gw_map:
-            bot.answer_callback_query(call.id, "بوابة غير صالحة")
-            return
-        bot.edit_message_text(f"🚀 بدء فحص {len(cards)} بطاقة على {name_map[gw_code]}...", call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id)
-        def run_mass_check():
-            approved = 0
-            session_id = f"mass_{user_id}_{int(time.time())}"
-            stopuser[session_id] = {'status': 'start'}
-            for i, card in enumerate(cards, 1):
-                if stopuser.get(session_id, {}).get('status') == 'stop':
-                    bot.send_message(user_id, f"⏹️ تم الإيقاف عند {i-1}/{len(cards)}")
-                    break
-                result = check_single_card(card, gw_map[gw_code], name_map[gw_code])
-                if 'Approved' in result['status']:
-                    approved += 1
-                msg = f"""<b>{result['status']} | {name_map[gw_code]}</b>
-📇 <code>{card}</code>
-💬 {result['response']}
-{result['bin_info']}
-⏱️ {result['time']:.2f}s"""
-                bot.send_message(user_id, msg, parse_mode="HTML")
-                bot.send_message(user_id, f"📊 تقدم: {i}/{len(cards)} | ✅ {approved}")
-                time.sleep(5)
-            bot.send_message(user_id, f"✅ **اكتمل الفحص**\n✅ Approved: {approved}\n❌ Declined: {len(cards)-approved}\n📊 الإجمالي: {len(cards)}")
-            if user_id in pending_mass_cards:
-                del pending_mass_cards[user_id]
-        threading.Thread(target=run_mass_check).start()
+    # ========== بوابات Auth ==========
+    elif data.startswith("gateway_st_"):
+        code = data.replace("gateway_st_", "")
+        gateways = {"st1": Stripe1, "st2": Stripe2, "st3": Stripe3, "st4": Stripe4, "st5": Stripe5, "st6": Stripe6}
+        names = {"st1": "Stripe1", "st2": "Stripe2", "st3": "Stripe3", "st4": "Stripe4", "st5": "Stripe5", "st6": "Stripe6"}
+        if code in gateways:
+            bot.edit_message_text(f"✅ تم اختيار {names[code]}\nأرسل البطاقة للفحص:\n`XXXX|MM|YYYY|CVV`\n\nأو قم بالرد على رسالة تحتوي على بطاقات", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+            pending_gateway[user_id] = (gateways[code], names[code])
     
-    # معالجة الكومبو (رفع ملف)
-    elif data.startswith("combo_"):
-        user = str(user_id)
-        if user not in user_file:
-            bot.answer_callback_query(call.id, "No file found")
-            return
-        if data == "combo_stripe":
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            gateways = [("Stripe1","st1"),("Stripe2","st2"),("Stripe3","st3"),("Stripe4","st4"),("Stripe5","st5"),("Stripe6","st6"),("Donate","donate")]
-            for name, code in gateways:
-                markup.add(types.InlineKeyboardButton(name, callback_data=f"start_combo_{code}"))
-            markup.add(types.InlineKeyboardButton("🔙 Back", callback_data="combo_back"))
-            bot.edit_message_text("Select Stripe:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        elif data == "combo_braintree":
-            markup = types.InlineKeyboardMarkup(row_width=2)
-            gateways = [("Braintree1","br1"),("Braintree2","br2"),("BraintreeCharge","chk1")]
-            for name, code in gateways:
-                markup.add(types.InlineKeyboardButton(name, callback_data=f"start_combo_{code}"))
-            markup.add(types.InlineKeyboardButton("🔙 Back", callback_data="combo_back"))
-            bot.edit_message_text("Select Braintree:", call.message.chat.id, call.message.message_id, reply_markup=markup)
-        elif data == "combo_back":
-            bot.edit_message_text("Select gateway type:", call.message.chat.id, call.message.message_id, reply_markup=combo_type_menu())
-        elif data == "combo_cancel":
-            if user in user_file:
-                f = user_file[user]
-                if os.path.exists(f):
-                    os.remove(f)
-                del user_file[user]
-            bot.edit_message_text("❌ Cancelled", call.message.chat.id, call.message.message_id)
-        bot.answer_callback_query(call.id)
+    elif data.startswith("gateway_br_"):
+        code = data.replace("gateway_br_", "")
+        gateways = {"br1": bra1, "br2": bra2}
+        names = {"br1": "Braintree1", "br2": "Braintree2"}
+        if code in gateways:
+            bot.edit_message_text(f"✅ تم اختيار {names[code]}\nأرسل البطاقة للفحص:\n`XXXX|MM|YYYY|CVV`\n\nأو قم بالرد على رسالة تحتوي على بطاقات", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+            pending_gateway[user_id] = (gateways[code], names[code])
     
-    elif data.startswith("start_combo_"):
-        user = str(user_id)
-        gw = data.replace("start_combo_", "")
-        if user not in user_file:
-            bot.answer_callback_query(call.id, "File expired")
-            return
-        gw_map = {
+    elif data.startswith("gateway_ch_"):
+        code = data.replace("gateway_ch_", "")
+        if code == "donate":
+            bot.edit_message_text(f"✅ تم اختيار Donate\nأرسل البطاقة للفحص:\n`XXXX|MM|YYYY|CVV`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+            pending_gateway[user_id] = (Donate, "Donate")
+        elif code == "braintree":
+            bot.edit_message_text(f"✅ تم اختيار BraintreeCharge\nأرسل البطاقة للفحص:\n`XXXX|MM|YYYY|CVV`", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+            pending_gateway[user_id] = (BraC, "BraintreeCharge")
+    
+    # ========== فحص الملفات ==========
+    elif data.startswith("file_start_st_"):
+        code = data.replace("file_start_st_", "")
+        gateways = {"st1": Stripe1, "st2": Stripe2, "st3": Stripe3, "st4": Stripe4, "st5": Stripe5, "st6": Stripe6}
+        names = {"st1": "Stripe1", "st2": "Stripe2", "st3": "Stripe3", "st4": "Stripe4", "st5": "Stripe5", "st6": "Stripe6"}
+        if user_id in pending_user_files and code in gateways:
+            start_file_check(call, user_id, pending_user_files[user_id], gateways[code], names[code])
+    
+    elif data.startswith("file_start_br_"):
+        code = data.replace("file_start_br_", "")
+        gateways = {"br1": bra1, "br2": bra2}
+        names = {"br1": "Braintree1", "br2": "Braintree2"}
+        if user_id in pending_user_files and code in gateways:
+            start_file_check(call, user_id, pending_user_files[user_id], gateways[code], names[code])
+    
+    elif data.startswith("file_start_ch_"):
+        code = data.replace("file_start_ch_", "")
+        if code == "donate" and user_id in pending_user_files:
+            start_file_check(call, user_id, pending_user_files[user_id], Donate, "Donate")
+        elif code == "braintree" and user_id in pending_user_files:
+            start_file_check(call, user_id, pending_user_files[user_id], BraC, "BraintreeCharge")
+    
+    # ========== فحص جماعي ==========
+    elif data.startswith("mass_"):
+        gw_code = data.replace("mass_", "")
+        gateways = {
             "st1": Stripe1, "st2": Stripe2, "st3": Stripe3, "st4": Stripe4, "st5": Stripe5, "st6": Stripe6,
             "donate": Donate, "br1": bra1, "br2": bra2, "chk1": BraC
         }
-        name_map = {
+        names = {
             "st1": "Stripe1", "st2": "Stripe2", "st3": "Stripe3", "st4": "Stripe4", "st5": "Stripe5", "st6": "Stripe6",
             "donate": "Donate", "br1": "Braintree1", "br2": "Braintree2", "chk1": "BraintreeCharge"
         }
-        if gw not in gw_map:
-            bot.answer_callback_query(call.id, "Invalid gateway")
-            return
-        filename = user_file[user]
-        msg = bot.send_message(call.message.chat.id, f"🚀 Starting on {name_map[gw]}...\n📁 {os.path.basename(filename)}")
-        session_id = f"{user}_{gw}_{int(time.time())}_{random.randint(1000,9999)}"
-        def run():
-            approved = 0
-            declined = 0
-            stopuser[session_id] = {'status': 'start'}
-            try:
-                with open(filename, 'r') as f:
-                    lines = [l.strip() for l in f if l.strip()]
-                    total = len(lines)
-                    for idx, cc in enumerate(lines):
-                        if stopuser.get(session_id, {}).get('status') == 'stop':
-                            bot.edit_message_text(f"⏹️ Stopped\n✅{approved} ❌{declined}", call.message.chat.id, msg.message_id)
-                            return
-                        try:
-                            start = time.time()
-                            result = str(gw_map[gw](cc))
-                            exec_time = time.time() - start
-                            mes = types.InlineKeyboardMarkup(row_width=1)
-                            mes.add(
-                                types.InlineKeyboardButton(f"• {cc[:20]}... •", callback_data='none'),
-                                types.InlineKeyboardButton(f"- Status! : {result[:30]} •", callback_data='none'),
-                                types.InlineKeyboardButton(f"- Approved! ✅ : [ {approved} ] •", callback_data='none'),
-                                types.InlineKeyboardButton(f"- Declined! ❌ : [ {declined} ] •", callback_data='none'),
-                                types.InlineKeyboardButton(f"- Total! : [ {total} ] •", callback_data='none'),
-                                types.InlineKeyboardButton("[ Stop Checker! ]", callback_data=f"stop_{session_id}")
-                            )
-                            bot.edit_message_text(f"- Checker To {name_map[gw]} ☑️\n- Time: {exec_time:.2f}s", call.message.chat.id, msg.message_id, reply_markup=mes)
-                            if 'Approved' in result or '✅' in result:
-                                approved += 1
-                                bot.send_message(user_id, f"✅ Approved | {name_map[gw]}\n📇 {cc}\n💬 {result}\n\n{dato(cc[:6])}")
-                            else:
-                                declined += 1
-                            time.sleep(10)
-                        except:
-                            declined += 1
-                            time.sleep(10)
-                bot.edit_message_text(f"✅ Completed! ✅{approved} ❌{declined} Total:{total}", call.message.chat.id, msg.message_id)
-            except Exception as e:
-                bot.edit_message_text(f"❌ Error: {e}", call.message.chat.id, msg.message_id)
-            finally:
-                if os.path.exists(filename):
-                    os.remove(filename)
-                if session_id in stopuser:
-                    del stopuser[session_id]
-        threading.Thread(target=run).start()
-        del user_file[user]
-        bot.answer_callback_query(call.id)
+        if user_id in pending_mass_cards and gw_code in gateways:
+            start_mass_check(call, user_id, pending_mass_cards[user_id], gateways[gw_code], names[gw_code])
     
+    # ========== إيقاف الفحص ==========
     elif data.startswith("stop_"):
         session_id = data.replace("stop_", "")
-        if session_id in stopuser:
-            stopuser[session_id]['status'] = 'stop'
-            bot.answer_callback_query(call.id, "✅ Stopped this checker only!")
-        else:
-            bot.answer_callback_query(call.id, "❌ Not found")
+        if session_id in stop_check:
+            stop_check[session_id] = True
+            bot.answer_callback_query(call.id, "✅ تم إيقاف الفحص")
     
     else:
         bot.answer_callback_query(call.id)
 
-# ==================== معالج الرسائل العام ====================
-@bot.message_handler(func=lambda m: True)
-def handle_text(m):
-    user = m.from_user.id
-    text = m.text.strip()
-    
-    # فحص BIN
-    if text.isdigit() and 6 <= len(text) <= 8:
-        bot.reply_to(m, check_bin_advanced(text[:6]), parse_mode="HTML")
-        return
-    
-    # معلومات وهمية
-    if text.lower() in ["usa","uk","canada","germany","france","italy","netherlands","india","pakistan","china","russia","switzerland","south korea","japan"]:
-        bot.reply_to(m, get_fake_info(text.capitalize()), parse_mode="HTML")
-        return
-    
-    # الفحص اليدوي من القائمة
-    if str(user) in pending_gateway:
-        gw = pending_gateway.pop(str(user))
-        gw_map = {"st1":Stripe1,"st2":Stripe2,"st3":Stripe3,"st4":Stripe4,"st5":Stripe5,"st6":Stripe6,"donate":Donate,"br1":bra1,"br2":bra2,"chk1":BraC}
-        name_map = {"st1":"Stripe1","st2":"Stripe2","st3":"Stripe3","st4":"Stripe4","st5":"Stripe5","st6":"Stripe6","donate":"Donate","br1":"Braintree1","br2":"Braintree2","chk1":"BraintreeCharge"}
-        if gw in gw_map:
-            check_card_individual(m, gw_map[gw], name_map[gw])
+# ========== دوال مساعدة للفحص ==========
 
-# ==================== تشغيل البوت ====================
-print('- Auth Bot was run with new features (str1,str2,str3,str4,str5,str6,br1,br2,chk1,donate, /gen, /mass)')
+def start_file_check(call, user_id, filename, check_func, gateway_name):
+    """بدء فحص الملف"""
+    try:
+        with open(filename, 'r') as f:
+            lines = [l.strip() for l in f if l.strip()]
+        
+        if not lines:
+            bot.edit_message_text("❌ الملف فارغ", call.message.chat.id, call.message.message_id)
+            return
+        
+        session_id = f"{user_id}_{int(time.time())}"
+        stop_check[session_id] = False
+        
+        msg = bot.send_message(call.message.chat.id, f"🚀 بدء فحص {len(lines)} بطاقة على {gateway_name}...")
+        
+        def run():
+            approved = 0
+            for i, card in enumerate(lines, 1):
+                if stop_check.get(session_id):
+                    bot.edit_message_text(f"⏹️ تم الإيقاف عند {i-1}/{len(lines)}", call.message.chat.id, msg.message_id)
+                    break
+                
+                try:
+                    start = time.time()
+                    result = str(check_func(card))
+                    exec_time = time.time() - start
+                    
+                    status = "Approved" if ("Approved" in result or "✅" in result) else "Declined"
+                    if "Approved" in status:
+                        approved += 1
+                    
+                    bin_info = get_bin_info(card[:6])
+                    result_msg = format_result(gateway_name, card, status, result, bin_info, exec_time)
+                    bot.send_message(user_id, result_msg, parse_mode="HTML")
+                    record_check_result(user_id, status == "Approved")
+                    
+                    markup = types.InlineKeyboardMarkup()
+                    markup.add(types.InlineKeyboardButton("⏹️ إيقاف", callback_data=f"stop_{session_id}"))
+                    bot.edit_message_text(f"📊 تقدم: {i}/{len(lines)} | ✅ {approved}\n⏱️ {exec_time:.2f}s", call.message.chat.id, msg.message_id, reply_markup=markup)
+                    
+                    time.sleep(7)
+                except Exception as e:
+                    bot.send_message(user_id, f"❌ خطأ في {card[:20]}...: {str(e)}")
+                    record_check_result(user_id, False)
+                    time.sleep(5)
+            
+            bot.edit_message_text(f"✅ اكتمل الفحص\n✅ مقبولة: {approved}\n❌ مرفوضة: {len(lines)-approved}", call.message.chat.id, msg.message_id)
+            os.remove(filename)
+            if user_id in pending_user_files:
+                del pending_user_files[user_id]
+        
+        threading.Thread(target=run).start()
+        bot.answer_callback_query(call.id)
+        
+    except Exception as e:
+        bot.edit_message_text(f"❌ خطأ: {str(e)}", call.message.chat.id, call.message.message_id)
+
+def start_mass_check(call, user_id, cards, check_func, gateway_name):
+    """بدء الفحص الجماعي"""
+    session_id = f"mass_{user_id}_{int(time.time())}"
+    stop_check[session_id] = False
+    
+    bot.edit_message_text(f"🚀 بدء فحص {len(cards)} بطاقة على {gateway_name}...", call.message.chat.id, call.message.message_id)
+    bot.answer_callback_query(call.id)
+    
+    def run():
+        approved = 0
+        for i, card in enumerate(cards, 1):
+            if stop_check.get(session_id):
+                bot.send_message(user_id, f"⏹️ تم الإيقاف عند {i-1}/{len(cards)}")
+                break
+            
+            try:
+                start = time.time()
+                result = str(check_func(card))
+                exec_time = time.time() - start
+                
+                status = "Approved" if ("Approved" in result or "✅" in result) else "Declined"
+                if "Approved" in status:
+                    approved += 1
+                
+                bin_info = get_bin_info(card[:6])
+                result_msg = format_result(gateway_name, card, status, result, bin_info, exec_time)
+                bot.send_message(user_id, result_msg, parse_mode="HTML")
+                record_check_result(user_id, status == "Approved")
+                bot.send_message(user_id, f"📊 تقدم: {i}/{len(cards)} | ✅ {approved}")
+                time.sleep(5)
+            except Exception as e:
+                bot.send_message(user_id, f"❌ خطأ في {card}: {str(e)}")
+                record_check_result(user_id, False)
+        
+        bot.send_message(user_id, f"✅ اكتمل الفحص\n✅ مقبولة: {approved}\n❌ مرفوضة: {len(cards)-approved}")
+        if user_id in pending_mass_cards:
+            del pending_mass_cards[user_id]
+    
+    threading.Thread(target=run).start()
+
+# ========== معالج الرسائل للفحص المؤقت ==========
+@bot.message_handler(func=lambda m: m.from_user.id in pending_gateway)
+def handle_pending_gateway(message):
+    """معالج البوابات المختارة من القائمة"""
+    user_id = message.from_user.id
+    check_func, gateway_name = pending_gateway[user_id]
+    
+    if message.reply_to_message and '\n' in message.reply_to_message.text:
+        # فحص متعدد
+        cards = extract_cards_from_message(message.reply_to_message.text)
+        if cards:
+            if not check_points(user_id, len(cards)):
+                del pending_gateway[user_id]
+                return
+            
+            status_msg = bot.reply_to(message, f"🚀 جاري فحص {len(cards)} بطاقة...")
+            
+            def run():
+                approved = 0
+                for i, card in enumerate(cards, 1):
+                    try:
+                        start = time.time()
+                        result = str(check_func(card))
+                        exec_time = time.time() - start
+                        status = "Approved" if ("Approved" in result or "✅" in result) else "Declined"
+                        if "Approved" in status:
+                            approved += 1
+                        bin_info = get_bin_info(card[:6])
+                        msg = format_result(gateway_name, card, status, result, bin_info, exec_time)
+                        bot.send_message(message.chat.id, msg, parse_mode="HTML")
+                        record_check_result(user_id, status == "Approved")
+                        time.sleep(5)
+                    except:
+                        pass
+                bot.edit_message_text(f"✅ اكتمل\n✅ {approved} | ❌ {len(cards)-approved}", message.chat.id, status_msg.message_id)
+            
+            threading.Thread(target=run).start()
+    else:
+        # فحص فردي
+        check_single_card_msg(message, check_func, gateway_name)
+    
+    del pending_gateway[user_id]
+
+# ========== تشغيل البوت ==========
+print("✅ البوت يعمل...")
+print(f"📊 تم تحميل {len(users_data)} مستخدم")
 
 while True:
     try:
         bot.infinity_polling(timeout=60)
     except Exception as e:
-        print(f'- Was error : {e}')
-        time.sleep(20)
+        print(f"❌ خطأ: {e}")
+        time.sleep(10)
