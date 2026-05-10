@@ -28,7 +28,7 @@ from freedom_donate import Donate
 # ===================================================================
 # ========================== إعدادات البوت ==========================
 # ===================================================================
-TOKEN = '8490768092:AAF_GAGrBWUmY4u3NAFATaYwNJDKLjEViLQ'
+TOKEN = '8490768092:AAF9j7wyL_NI7Fx5jGEn0h3VxuMxeAM2s0I'
 ADMIN_ID = 1489001988
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 
